@@ -1,7 +1,7 @@
 import os
 import json
 from datetime import datetime
-from flask import Flask, request, session, redirect, url_for, Response
+from flask import Flask, request, session, redirect, url_for, Response, jsonify
 import core
 
 app = Flask(__name__)
@@ -22,7 +22,8 @@ def get_config():
         "initialized": data.get("initialized", False),
         "base_url": data.get("base_url", "api.ytea.top/v1"),
         "model": data.get("model", "gpt-4o"),
-        "port": data.get("port", 9996)
+        "port": data.get("port", 9996),
+        "api_key": data.get("api_key", "")
     }
 
 def set_config(key, value):
@@ -66,7 +67,6 @@ def init_page():
     cfg = get_config()
     if cfg["initialized"]:
         return redirect(url_for("index"))
-    # 传递当前语言，页面会据此切换显示，也能动态切换
     return plain_response(HTML_INIT.format(
         lang=cfg["language"],
         title=_("init_title", cfg["language"]),
@@ -90,18 +90,38 @@ def index():
     cfg = get_config()
     if not cfg["initialized"]:
         return redirect(url_for("init_page"))
+
+    convs = core.get_conversations()
+    last_conv = session.get("last_conv", "")
+    if not convs:
+        cid = core.create_conversation("新对话")
+        last_conv = cid
+        session["last_conv"] = cid
+    elif last_conv not in convs:
+        first = next(iter(convs))
+        last_conv = first
+        session["last_conv"] = first
+
     return plain_response(HTML_MAIN.format(
         title=_("chat_title", cfg["language"]),
-        lang=cfg["language"]
+        lang=cfg["language"],
+        last_conv=last_conv
     ))
 
-# ---------- API 端点 (保持不变) ----------
+# ---------- API 端点 ----------
 @app.route("/api/config", methods=["GET"])
 def api_get_config():
     cfg = get_config()
-    return jsonify({"language": cfg["language"], "base_url": cfg["base_url"],
-                    "model": cfg["model"], "has_key": bool(cfg.get("api_key")),
-                    "port": cfg["port"], "token": cfg["token"][:4] + "****" if cfg["token"] else ""})
+    has_key = bool(cfg.get("api_key"))
+    return jsonify({
+        "language": cfg["language"],
+        "base_url": cfg["base_url"],
+        "model": cfg["model"],
+        "has_key": has_key,
+        "port": cfg["port"],
+        "token_prefix": cfg["token"][:4] + "****" if cfg["token"] else "",
+        "api_key": "••••••••" if has_key else ""
+    })
 
 @app.route("/api/config", methods=["POST"])
 def api_set_config():
@@ -129,7 +149,7 @@ def api_init():
 @app.route("/api/fetch_models")
 def api_fetch_models():
     base_url = request.args.get("base_url", "")
-    api_key = request.args.get("api_key", "")
+    api_key = request.args.get("api_key", "") or get_config().get("api_key", "")
     models = core.fetch_model_list(base_url, api_key)
     return jsonify({"models": models or []})
 
@@ -258,23 +278,39 @@ def api_execute():
         return jsonify({"reply": core.clean_reply(reply)})
     return jsonify({"error": "api_fail"}), 500
 
-# ---------- HTML 模板（已彻底修正，无 Jinja2 干扰） ----------
+# ---------- HTML 模板 ----------
 HTML_LOGIN = """<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>{title}</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>{title}</title>
 <style>
-:root {{ --bg:#0a0a14; --text:#f0f0fa; --card:rgba(18,18,32,0.9); --border:rgba(255,255,255,0.1); }}
+:root {{ --bg:#0a0a14; --text:#f0f0fa; --card:rgba(18,18,32,0.75); --border:rgba(255,255,255,0.12); --purple:#a855f7; }}
 body {{ background:var(--bg); display:flex; align-items:center; justify-content:center; height:100vh; font-family:system-ui; margin:0; }}
-.card {{ background:var(--card); border:1px solid var(--border); border-radius:24px; padding:40px; width:360px; text-align:center; }}
-h1 {{ background:linear-gradient(135deg,#a855f7,#ec4899); -webkit-background-clip:text; -webkit-text-fill-color:transparent; margin:0 0 20px; }}
-input {{ width:100%; padding:14px; background:rgba(255,255,255,0.05); border:1px solid var(--border); border-radius:14px; color:white; margin:12px 0; box-sizing:border-box; }}
-button {{ background:linear-gradient(135deg,#a855f7,#6366f1); color:white; border:none; padding:14px 30px; border-radius:50px; cursor:pointer; font-size:16px; }}
-.error {{ color:#f87171; margin-top:10px; }}
+.card {{
+  background: var(--card); backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+  border:1px solid var(--border); border-radius:28px; padding:48px 36px; width:380px; text-align:center;
+  box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+}}
+h1 {{ background:linear-gradient(135deg,#a855f7,#ec4899); -webkit-background-clip:text; -webkit-text-fill-color:transparent; margin:0 0 24px; font-size:2rem; }}
+.token-icon {{ font-size:2.5rem; margin-bottom:12px; }}
+input {{
+  width:100%; padding:16px 20px; background:rgba(255,255,255,0.06); border:2px solid rgba(255,255,255,0.15);
+  border-radius:16px; color:white; font-size:1rem; margin:16px 0; box-sizing:border-box;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}}
+input:focus {{ border-color: var(--purple); box-shadow: 0 0 0 3px rgba(168,85,247,0.3); outline:none; }}
+button {{
+  width:100%; padding:16px; background:linear-gradient(135deg,var(--purple),#6366f1);
+  border:none; border-radius:50px; color:white; font-size:1.1rem; font-weight:600; cursor:pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}}
+button:hover {{ transform: translateY(-2px); box-shadow: 0 8px 20px rgba(168,85,247,0.4); }}
+.error {{ color:#f87171; margin-top:14px; font-size:0.9rem; }}
 </style></head><body>
 <div class="card">
+<div class="token-icon">🔑</div>
 <h1>{title}</h1>
+<p style="color:#b9b9d4; margin-bottom:12px;">{prompt}</p>
 <form method="POST">
-<p style="color:#b9b9d4;">{prompt}</p>
-<input type="password" name="token" required><br>
+<input type="password" name="token" placeholder="粘贴访问令牌" required>
 <button type="submit">{button}</button>
 </form>
 <p class="error">{error}</p>
@@ -282,15 +318,15 @@ button {{ background:linear-gradient(135deg,#a855f7,#6366f1); color:white; borde
 
 HTML_INIT = """<!DOCTYPE html>
 <html lang="{lang}">
-<head><meta charset="UTF-8"><title>{title}</title>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>{title}</title>
 <style>
-:root {{ --bg:#0a0a14; --text:#f0f0fa; --card:rgba(18,18,32,0.9); --border:rgba(255,255,255,0.1); }}
+:root {{ --bg:#0a0a14; --text:#f0f0fa; --card:rgba(18,18,32,0.75); --border:rgba(255,255,255,0.12); }}
 body {{ background:var(--bg); display:flex; align-items:center; justify-content:center; height:100vh; font-family:system-ui; margin:0; }}
-.card {{ background:var(--card); border:1px solid var(--border); border-radius:24px; padding:30px; width:420px; }}
-h1 {{ background:linear-gradient(135deg,#a855f7,#ec4899); -webkit-background-clip:text; -webkit-text-fill-color:transparent; margin:0 0 20px; }}
-label {{ color:var(--text); margin:10px 0 5px; display:block; }}
-select, input {{ width:100%; padding:12px; background:rgba(255,255,255,0.05); border:1px solid var(--border); border-radius:14px; color:white; margin-bottom:10px; box-sizing:border-box; }}
-button {{ background:linear-gradient(135deg,#a855f7,#6366f1); color:white; border:none; padding:12px 24px; border-radius:50px; cursor:pointer; float:right; }}
+.card {{ background:var(--card); backdrop-filter:blur(30px); border:1px solid var(--border); border-radius:28px; padding:36px; width:420px; box-shadow:0 20px 40px rgba(0,0,0,0.5); }}
+h1 {{ background:linear-gradient(135deg,#a855f7,#ec4899); -webkit-background-clip:text; -webkit-text-fill-color:transparent; margin:0 0 24px; }}
+label {{ color:var(--text); margin:14px 0 6px; display:block; font-weight:500; }}
+select, input {{ width:100%; padding:14px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.15); border-radius:14px; color:white; margin-bottom:12px; box-sizing:border-box; }}
+button {{ background:linear-gradient(135deg,#a855f7,#6366f1); color:white; border:none; padding:12px 28px; border-radius:50px; cursor:pointer; float:right; font-weight:600; }}
 .step {{ display:none; }}
 .step.active {{ display:block; }}
 </style></head><body>
@@ -330,38 +366,11 @@ button {{ background:linear-gradient(135deg,#a855f7,#6366f1); color:white; borde
 </div>
 </form></div>
 <script>
-// 当前语言数据，用于动态切换
 const translations = {{
-  Chinese: {{
-    step1Label: "选择语言",
-    step2Label: "AI 提供商",
-    step3Label: "API Key",
-    step4Label: "选择模型",
-    next: "下一步",
-    complete: "完成",
-    loading: "加载中...",
-    custom: "自定义",
-    tokenLabel: "访问令牌",
-    tokenPlaceholder: "留空则保持当前令牌",
-    fetchFail: "获取列表失败"
-  }},
-  English: {{
-    step1Label: "Choose Language",
-    step2Label: "AI Provider",
-    step3Label: "API Key",
-    step4Label: "Select Model",
-    next: "Next",
-    complete: "Complete",
-    loading: "Loading...",
-    custom: "Custom",
-    tokenLabel: "Access Token",
-    tokenPlaceholder: "Leave blank to keep current token",
-    fetchFail: "Failed to fetch models"
-  }}
+  Chinese: {{ step1Label:"选择语言", step2Label:"AI 提供商", step3Label:"API Key", step4Label:"选择模型", next:"下一步", complete:"完成", loading:"加载中...", custom:"自定义", tokenLabel:"访问令牌", tokenPlaceholder:"留空则保持当前令牌", fetchFail:"获取列表失败" }},
+  English: {{ step1Label:"Choose Language", step2Label:"AI Provider", step3Label:"API Key", step4Label:"Select Model", next:"Next", complete:"Complete", loading:"Loading...", custom:"Custom", tokenLabel:"Access Token", tokenPlaceholder:"Leave blank to keep current token", fetchFail:"Failed to fetch models" }}
 }};
-
 let currentLang = '{lang}';
-
 function switchLanguage() {{
   currentLang = document.getElementById('langSelect').value;
   const t = translations[currentLang];
@@ -374,10 +383,8 @@ function switchLanguage() {{
   document.getElementById('tokenInput').placeholder = t.tokenPlaceholder;
   document.querySelectorAll('[id^=nextBtn]').forEach(btn => btn.innerText = t.next);
   document.getElementById('completeBtn').innerText = t.complete;
-  // 若当前在第四步，重新加载模型列表（语言可能影响API错误提示，但这里只需刷新模型列表）
   if (currentStep === 4) loadModels();
 }}
-
 let currentStep = 1;
 function nextStep(n) {{
   document.getElementById('step'+currentStep).classList.remove('active');
@@ -388,16 +395,9 @@ function nextStep(n) {{
 document.getElementById('providerSelect').addEventListener('change', function() {{
   document.getElementById('customUrlDiv').style.display = this.value==='custom' ? 'block' : 'none';
 }});
-
 async function loadModels() {{
   let provider = document.getElementById('providerSelect').value;
-  let baseUrl;
-  if (provider==='custom') {{
-    baseUrl = document.getElementById('customUrl').value.trim();
-  }} else {{
-    const map = {{'ytea':'api.ytea.top/v1','openai':'api.openai.com/v1','openrouter':'openrouter.ai/api/v1'}};
-    baseUrl = map[provider];
-  }}
+  let baseUrl = provider==='custom' ? document.getElementById('customUrl').value.trim() : {{'ytea':'api.ytea.top/v1','openai':'api.openai.com/v1','openrouter':'openrouter.ai/api/v1'}}[provider];
   let apiKey = document.getElementById('apiKey').value;
   const sel = document.getElementById('modelSelect');
   sel.innerHTML = '<option>'+translations[currentLang].loading+'</option>';
@@ -405,44 +405,391 @@ async function loadModels() {{
   let data = await resp.json();
   sel.innerHTML = '';
   if (data.models && data.models.length>0) {{
-    data.models.forEach(m => {{
-      let opt = document.createElement('option'); opt.value=m; opt.text=m; sel.appendChild(opt);
-    }});
+    data.models.forEach(m => {{ let opt = document.createElement('option'); opt.value=m; opt.text=m; sel.appendChild(opt); }});
   }} else {{
-    let opt = document.createElement('option');
-    opt.text = translations[currentLang].fetchFail;
-    sel.appendChild(opt);
+    let opt = document.createElement('option'); opt.text = translations[currentLang].fetchFail; sel.appendChild(opt);
   }}
 }}
-
 async function submitInit() {{
   let lang = document.getElementById('langSelect').value;
   let provider = document.getElementById('providerSelect').value;
-  let baseUrl;
-  if (provider==='custom') {{
-    baseUrl = document.getElementById('customUrl').value.trim();
-  }} else {{
-    const map = {{'ytea':'api.ytea.top/v1','openai':'api.openai.com/v1','openrouter':'openrouter.ai/api/v1'}};
-    baseUrl = map[provider];
-  }}
+  let baseUrl = provider==='custom' ? document.getElementById('customUrl').value.trim() : {{'ytea':'api.ytea.top/v1','openai':'api.openai.com/v1','openrouter':'openrouter.ai/api/v1'}}[provider];
   let apiKey = document.getElementById('apiKey').value;
   let model = document.getElementById('modelSelect').value;
   let token = document.getElementById('tokenInput').value;
-  await fetch('/api/init', {{
-    method:'POST', headers:{{'Content-Type':'application/json'}},
-    body:JSON.stringify({{language:lang, base_url:baseUrl, api_key:apiKey, model:model, token:token}})
-  }});
+  await fetch('/api/init', {{ method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{language:lang, base_url:baseUrl, api_key:apiKey, model:model, token:token}}) }});
   window.location.href = '/';
 }}
-
-// 初始加载时根据 currentLang 设置页面语言
-window.onload = function() {{
-  document.getElementById('langSelect').value = currentLang;
-  switchLanguage();
-}};
+window.onload = function() {{ document.getElementById('langSelect').value = currentLang; switchLanguage(); }};
 </script>
 </body></html>"""
 
-# 主界面 HTML_MAIN 较长，此处为节省篇幅不再重复，请直接复制之前答案中修正过不再含 {% raw %} 的完整 HTML_MAIN 字符串，
-# 并确保其中的样式仍使用双花括号（如 :root {{ }}），因为我们是直接返回字符串，不会有 Jinja2 解析。
-# 需要注意：HTML_MAIN 也需要将固定的中文/英文文本改为通过 format 传入或使用前端多语言，但主界面已有独立的多语言 json，可维持当前设计。
+HTML_MAIN = """<!DOCTYPE html>
+<html lang="{lang}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes, viewport-fit=cover">
+<title>{title}</title>
+<style>
+:root {{
+  --bg: #0a0a14;
+  --text: #f0f0fa;
+  --text2: #b9b9d4;
+  --surface: rgba(18,18,32,0.7);
+  --border: rgba(255,255,255,0.1);
+  --purple: #a855f7;
+  --pink: #ec4899;
+  --radius: 18px;
+  font-family: system-ui, 'PingFang SC', sans-serif;
+}}
+* {{ box-sizing: border-box; margin:0; padding:0; }}
+body {{ background:var(--bg); color:var(--text); height:100vh; display:flex; }}
+/* 侧边栏 */
+.sidebar {{
+  width: 270px; background: var(--surface); backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+  border-right: 1px solid var(--border); display:flex; flex-direction:column; padding:20px 14px;
+  flex-shrink:0; z-index:10;
+}}
+.sidebar h3 {{
+  font-size: 1.5rem; background: linear-gradient(135deg, var(--purple), var(--pink));
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent; margin-bottom:20px; text-align:center;
+}}
+.conv-list {{ flex:1; overflow-y:auto; min-height:0; }}
+.conv-item {{
+  display:flex; align-items:center; justify-content:space-between; padding:12px 14px;
+  border-radius:14px; cursor:pointer; margin-bottom:6px; color:var(--text2);
+  transition: background 0.2s, color 0.2s;
+}}
+.conv-item:hover {{ background:rgba(255,255,255,0.08); }}
+.conv-item.active {{ background:rgba(168,85,247,0.2); color:white; }}
+.conv-name {{ flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+.conv-actions {{ position:relative; visibility:hidden; }}
+.conv-item:hover .conv-actions {{ visibility:visible; }}
+.dots-btn {{ background:none; border:none; color:var(--text2); font-size:20px; cursor:pointer; padding:0 6px; }}
+.dropdown {{
+  display:none; position:absolute; right:0; top:100%; background:#2a2a3c; border:1px solid var(--border);
+  border-radius:10px; padding:6px 0; min-width:110px; z-index:20;
+}}
+.dropdown.show {{ display:block; }}
+.dropdown-item {{ padding:8px 14px; font-size:0.85rem; cursor:pointer; color:var(--text2); }}
+.dropdown-item:hover {{ background:rgba(255,255,255,0.1); }}
+.new-chat-btn {{
+  margin-top:16px; padding:14px; background:linear-gradient(135deg, var(--purple), #6366f1);
+  border:none; border-radius:50px; color:white; font-size:0.95rem; font-weight:600; cursor:pointer;
+  transition: transform 0.2s, box-shadow 0.2s; flex-shrink:0;
+}}
+.new-chat-btn:hover {{ transform:translateY(-2px); box-shadow:0 8px 20px rgba(168,85,247,0.4); }}
+/* 主区域 */
+.main {{
+  flex:1; display:flex; flex-direction:column; min-width:0;
+}}
+.header {{
+  padding:14px 24px; border-bottom:1px solid var(--border); display:flex;
+  justify-content:space-between; align-items:center; background:rgba(18,18,32,0.4);
+  backdrop-filter:blur(20px); flex-shrink:0;
+}}
+.header h2 {{ font-size:1.3rem; }}
+/* 聊天区域：占据剩余空间，可滚动 */
+.chat-area {{
+  flex:1; overflow-y:auto; padding:24px; display:flex; flex-direction:column; gap:14px;
+  background: rgba(10,10,20,0.4); backdrop-filter:blur(10px);
+}}
+.msg {{ max-width:72%; padding:12px 18px; border-radius:20px; line-height:1.6; word-break:break-word; }}
+.msg.user {{ align-self:flex-end; background:rgba(168,85,247,0.25); border:1px solid rgba(168,85,247,0.4); }}
+.msg.ai {{ align-self:flex-start; background:rgba(255,255,255,0.06); border:1px solid var(--border); }}
+.empty-hint {{
+  align-self:center; margin:auto; color:var(--text2); opacity:0.6; font-size:0.95rem;
+  text-align:center;
+}}
+/* 输入区域固定在底部 */
+.input-area {{
+  padding:14px 24px; border-top:1px solid var(--border); display:flex; gap:10px;
+  background:rgba(18,18,32,0.6); backdrop-filter:blur(20px); flex-shrink:0;
+}}
+.input-area input {{
+  flex:1; padding:14px 20px; background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.15);
+  border-radius:50px; color:white; outline:none; font-size:1rem;
+  transition: border-color 0.2s;
+}}
+.input-area input:focus {{ border-color:var(--purple); }}
+.btn {{
+  padding:10px 22px; background:rgba(255,255,255,0.06); border:1px solid var(--border);
+  border-radius:50px; color:var(--text2); cursor:pointer; font-size:0.9rem; transition:0.2s;
+}}
+.btn-primary {{ background:linear-gradient(135deg, var(--purple), #6366f1); color:white; border:none; }}
+/* 模态框 */
+.modal {{
+  display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:100;
+  justify-content:center; align-items:center; backdrop-filter:blur(6px);
+}}
+.modal.active {{ display:flex; }}
+.modal-card {{
+  background: var(--surface); backdrop-filter:blur(30px); border:1px solid var(--border);
+  border-radius:24px; padding:28px; width:90%; max-width:420px; box-shadow:0 20px 40px rgba(0,0,0,0.6);
+}}
+.modal-card h3 {{ margin-bottom:18px; }}
+.modal-card input, .modal-card select {{
+  width:100%; padding:14px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.15);
+  border-radius:14px; color:white; margin-bottom:14px; box-sizing:border-box;
+}}
+.actions {{ display:flex; justify-content:flex-end; gap:10px; margin-top:10px; }}
+/* 手机 */
+@media (max-width: 768px) {{
+  body {{ flex-direction:column; }}
+  .sidebar {{
+    width:100%; max-height:35vh; border-right:none; border-bottom:1px solid var(--border);
+    padding:12px;
+  }}
+  .main {{ height:65vh; }} /* 限定高度让输入框可见 */
+  .header {{ padding:10px 16px; }}
+  .header h2 {{ font-size:1rem; }}
+  .chat-area {{ padding:14px; }}
+  .msg {{ max-width:85%; }}
+  .input-area {{ padding:10px 16px; }}
+  .input-area input {{ padding:12px 16px; font-size:0.9rem; }}
+}}
+</style>
+</head>
+<body>
+<div class="sidebar">
+  <h3>VZclaw</h3>
+  <div class="conv-list" id="convList"></div>
+  <button class="new-chat-btn" onclick="newConversation()">＋ 新对话</button>
+</div>
+<div class="main">
+  <div class="header">
+    <h2 id="convTitle">选择对话</h2>
+    <button class="btn" onclick="openSettings()">设置</button>
+  </div>
+  <div class="chat-area" id="chatArea">
+    <div class="empty-hint">✨ 点击左侧对话开始聊天</div>
+  </div>
+  <div class="input-area">
+    <input type="text" id="msgInput" placeholder="输入消息..." onkeydown="if(event.key==='Enter') sendMessage()">
+    <button class="btn btn-primary" onclick="sendMessage()">发送</button>
+  </div>
+</div>
+
+<!-- 设置弹窗 -->
+<div class="modal" id="settingsModal">
+  <div class="modal-card">
+    <h3>设置</h3>
+    <label>Base URL</label>
+    <input type="text" id="setBaseUrl">
+    <label>API Key</label>
+    <input type="password" id="setApiKey" placeholder="留空则保持不变">
+    <label>模型</label>
+    <select id="setModel"></select>
+    <label>语言</label>
+    <select id="setLanguage"><option value="Chinese">中文</option><option value="English">English</option></select>
+    <label>访问令牌</label>
+    <input type="text" id="setToken">
+    <div class="actions">
+      <button class="btn" onclick="closeSettings()">取消</button>
+      <button class="btn btn-primary" onclick="saveSettings()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 操作确认弹窗 -->
+<div class="modal" id="confirmModal">
+  <div class="modal-card">
+    <h3>确认操作</h3>
+    <p id="confirmText"></p>
+    <div class="actions">
+      <button class="btn" onclick="respondConfirm(false)">拒绝</button>
+      <button class="btn btn-primary" onclick="respondConfirm(true)">允许</button>
+    </div>
+  </div>
+</div>
+
+<!-- 重命名弹窗 -->
+<div class="modal" id="renameModal">
+  <div class="modal-card">
+    <h3>重命名对话</h3>
+    <input type="text" id="renameInput" placeholder="输入新名称">
+    <div class="actions">
+      <button class="btn" onclick="closeRename()">取消</button>
+      <button class="btn btn-primary" onclick="confirmRename()">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- 删除确认弹窗 -->
+<div class="modal" id="deleteModal">
+  <div class="modal-card">
+    <h3>删除对话</h3>
+    <p>确定要删除这个对话吗？此操作不可撤销。</p>
+    <div class="actions">
+      <button class="btn" onclick="closeDelete()">取消</button>
+      <button class="btn btn-primary" style="background:#ef4444;" onclick="confirmDelete()">删除</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const LAST_CONV = "{last_conv}";
+let currentConvId = null;
+let pendingConfirm = null;
+let renameCid = null;
+let deleteCid = null;
+
+async function loadConversations() {{
+  let res = await fetch('/api/conversations');
+  let convs = await res.json();
+  let list = document.getElementById('convList');
+  list.innerHTML = '';
+
+  if (convs.length === 0) {{
+    await newConversation(true);
+    return;
+  }}
+
+  convs.forEach(c => {{
+    let item = document.createElement('div');
+    item.className = 'conv-item' + (c.id === currentConvId ? ' active' : '');
+    item.innerHTML = `<span class="conv-name" onclick="switchConversation('${{c.id}}')">${{c.name}}</span>
+      <div class="conv-actions">
+        <button class="dots-btn" onclick="toggleDropdown(event, '${{c.id}}')">⋯</button>
+        <div class="dropdown" id="dropdown-${{c.id}}">
+          <div class="dropdown-item" onclick="openRename('${{c.id}}')">重命名</div>
+          <div class="dropdown-item" onclick="openDelete('${{c.id}}')">删除</div>
+        </div>
+      </div>`;
+    list.appendChild(item);
+  }});
+
+  if (!currentConvId) {{
+    let target = convs.find(c => c.id === LAST_CONV) || convs[0];
+    if (target) {{
+      switchConversation(target.id);
+    }}
+  }}
+}}
+
+function toggleDropdown(e, cid) {{
+  e.stopPropagation();
+  let dropdown = document.getElementById('dropdown-' + cid);
+  document.querySelectorAll('.dropdown').forEach(d => d.classList.remove('show'));
+  dropdown.classList.toggle('show');
+}}
+document.addEventListener('click', () => {{ document.querySelectorAll('.dropdown').forEach(d => d.classList.remove('show')); }});
+
+async function switchConversation(cid) {{
+  currentConvId = cid;
+  document.getElementById('convTitle').innerText = (await getConvName(cid)) || '对话';
+  loadHistory();
+  loadConversations();
+}}
+async function getConvName(cid) {{
+  let res = await fetch('/api/conversations'); let convs = await res.json();
+  let c = convs.find(c => c.id === cid); return c ? c.name : null;
+}}
+async function newConversation(silent) {{
+  let res = await fetch('/api/conversations', {{ method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{name:'新对话'}}) }});
+  let data = await res.json(); currentConvId = data.id;
+  if (!silent) {{ loadConversations(); switchConversation(data.id); }} else {{ loadConversations(); }}
+}}
+
+// 重命名
+function openRename(cid) {{ renameCid = cid; document.getElementById('renameInput').value = ''; document.getElementById('renameModal').classList.add('active'); }}
+function closeRename() {{ document.getElementById('renameModal').classList.remove('active'); renameCid = null; }}
+async function confirmRename() {{
+  let name = document.getElementById('renameInput').value.trim();
+  if (name && renameCid) {{
+    await fetch('/api/conversations/'+renameCid, {{ method:'PUT', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{name:name}}) }});
+    loadConversations(); if (currentConvId === renameCid) document.getElementById('convTitle').innerText = name;
+  }}
+  closeRename();
+}}
+
+// 删除
+function openDelete(cid) {{ deleteCid = cid; document.getElementById('deleteModal').classList.add('active'); }}
+function closeDelete() {{ document.getElementById('deleteModal').classList.remove('active'); deleteCid = null; }}
+async function confirmDelete() {{
+  if (deleteCid) {{
+    await fetch('/api/conversations/'+deleteCid, {{ method:'DELETE' }});
+    if (currentConvId === deleteCid) {{
+      currentConvId = null; document.getElementById('chatArea').innerHTML = ''; document.getElementById('convTitle').innerText = '选择对话';
+    }}
+    loadConversations();
+  }}
+  closeDelete();
+}}
+
+async function loadHistory() {{
+  if (!currentConvId) return;
+  let res = await fetch('/api/history/'+currentConvId); let data = await res.json();
+  let area = document.getElementById('chatArea'); area.innerHTML = '';
+  data.history.forEach(m => {{
+    let div = document.createElement('div'); div.className = 'msg ' + m.role; div.innerText = m.content; area.appendChild(div);
+  }});
+  area.scrollTop = area.scrollHeight;
+}}
+
+async function sendMessage() {{
+  if (!currentConvId) {{ alert('请先创建或选择对话'); return; }}
+  let input = document.getElementById('msgInput'); let msg = input.value.trim(); if (!msg) return;
+  input.value = '';
+  let div = document.createElement('div'); div.className = 'msg user'; div.innerText = msg;
+  document.getElementById('chatArea').appendChild(div);
+  let think = document.createElement('div'); think.className = 'msg ai'; think.innerText = '思考中...';
+  document.getElementById('chatArea').appendChild(think);
+  document.getElementById('chatArea').scrollTop = document.getElementById('chatArea').scrollHeight;
+  let res = await fetch('/api/chat', {{ method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{convId:currentConvId, message:msg}}) }});
+  think.remove();
+  let data = await res.json();
+  if (data.error) {{ let errDiv = document.createElement('div'); errDiv.className = 'msg ai'; errDiv.innerText = '错误: ' + data.error; document.getElementById('chatArea').appendChild(errDiv); return; }}
+  if (data.reply) {{ let aiDiv = document.createElement('div'); aiDiv.className = 'msg ai'; aiDiv.innerText = data.reply; document.getElementById('chatArea').appendChild(aiDiv); }}
+  if (data.auto_exec) {{ let autoDiv = document.createElement('div'); autoDiv.className = 'msg ai'; autoDiv.innerText = '📂 ' + data.auto_exec; document.getElementById('chatArea').appendChild(autoDiv); }}
+  if (data.requests && data.requests.length > 0) {{
+    let req = data.requests[0]; pendingConfirm = req;
+    document.getElementById('confirmText').innerText = req.action + ': ' + req.arg;
+    document.getElementById('confirmModal').classList.add('active');
+  }}
+  document.getElementById('chatArea').scrollTop = document.getElementById('chatArea').scrollHeight;
+}}
+
+async function respondConfirm(allow) {{
+  document.getElementById('confirmModal').classList.remove('active');
+  if (!pendingConfirm || !currentConvId) return;
+  let res = await fetch('/api/execute', {{ method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{ convId:currentConvId, action:pendingConfirm.action, arg:pendingConfirm.arg, content:pendingConfirm.content||'', confirm:allow }}) }});
+  pendingConfirm = null;
+  let data = await res.json();
+  if (data.reply) {{ let div = document.createElement('div'); div.className = 'msg ai'; div.innerText = data.reply; document.getElementById('chatArea').appendChild(div); document.getElementById('chatArea').scrollTop = document.getElementById('chatArea').scrollHeight; }}
+}}
+
+async function openSettings() {{
+  let resp = await fetch('/api/config'); let cfg = await resp.json();
+  document.getElementById('setBaseUrl').value = cfg.base_url || '';
+  document.getElementById('setLanguage').value = cfg.language || 'Chinese';
+  document.getElementById('setApiKey').value = cfg.api_key || '';
+  document.getElementById('setToken').value = cfg.token_prefix || '';
+  let modelResp = await fetch('/api/fetch_models?base_url=' + encodeURIComponent(cfg.base_url));
+  let modelData = await modelResp.json();
+  let sel = document.getElementById('setModel'); sel.innerHTML = '';
+  if (modelData.models) {{
+    modelData.models.forEach(m => {{ let opt = document.createElement('option'); opt.value=m; opt.text=m; sel.appendChild(opt); }});
+    sel.value = cfg.model;
+  }}
+  document.getElementById('settingsModal').classList.add('active');
+}}
+function closeSettings() {{ document.getElementById('settingsModal').classList.remove('active'); }}
+async function saveSettings() {{
+  let config = {{
+    base_url: document.getElementById('setBaseUrl').value,
+    language: document.getElementById('setLanguage').value,
+    model: document.getElementById('setModel').value,
+    token: document.getElementById('setToken').value
+  }};
+  let apiKey = document.getElementById('setApiKey').value;
+  if (apiKey) config.api_key = apiKey;
+  await fetch('/api/config', {{ method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify(config) }});
+  closeSettings(); location.reload();
+}}
+
+window.onload = () => {{ loadConversations(); }};
+</script>
+</body>
+</html>
+"""
